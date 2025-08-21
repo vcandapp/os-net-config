@@ -1165,6 +1165,208 @@ class TestUtils(base.TestCase):
         self.assertRaises(utils.VppException,
                           utils._get_vpp_interface, '0000:09.0')
 
+    def test_remove_dpdk_interface_by_name(self):
+
+        def fake_detach(pci):
+            return 0
+
+        def fake_unbind(pci):
+            return 0
+
+        def fake_get_dpdk_pci_address(name):
+            # Mock the PCI address lookup for interface names
+            if name == 'eth1':
+                return '0000:03:00.0'
+            elif name == 'eth2':
+                return '0000:04:00.0'
+            return None
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+        self.stub_out('os_net_config.common.get_dpdk_pci_address',
+                      fake_get_dpdk_pci_address)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'},
+            {'name': 'eth2', 'pci_address': '0000:04:00.0',
+             'mac_address': '01:02:03:04:05:07', 'driver': 'igb_uio'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+        utils.remove_dpdk_interface('eth1')
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+        self.assertEqual(new_map[0]['name'], 'eth2')
+
+    def test_remove_dpdk_interface_by_pci(self):
+
+        def fake_detach(pci):
+            return 0
+
+        def fake_unbind(pci):
+            return 0
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'},
+            {'name': 'eth2', 'pci_address': '0000:04:00.0',
+             'mac_address': '01:02:03:04:05:07', 'driver': 'igb_uio'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+        utils.remove_dpdk_interface('0000:04:00.0')
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+        self.assertEqual(new_map[0]['pci_address'], '0000:03:00.0')
+
+    def test_remove_dpdk_interface_not_found(self):
+        def fake_detach(pci):
+            return 0
+
+        def fake_unbind(pci):
+            return 0
+
+        def fake_get_dpdk_pci_address(name):
+            # Return None for non-existent interface
+            return None
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+        self.stub_out('os_net_config.common.get_dpdk_pci_address',
+                      fake_get_dpdk_pci_address)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+
+        # Try to remove non-existent interface
+        utils.remove_dpdk_interface('eth999')
+
+        # Map should remain unchanged
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+
+    def test_remove_dpdk_interface_unbind_fails(self):
+        def fake_detach(pci):
+            return 0
+
+        def fake_unbind(pci):
+            return 1  # Simulate unbind failure
+
+        def fake_get_dpdk_pci_address(name):
+            if name == 'eth1':
+                return '0000:03:00.0'
+            return None
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+        self.stub_out('os_net_config.common.get_dpdk_pci_address',
+                      fake_get_dpdk_pci_address)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+
+        # Remove should fail but not crash
+        utils.remove_dpdk_interface('eth1')
+
+        # Map should remain unchanged due to unbind failure
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+
+    def test_is_pci_address_format_valid(self):
+        # Test valid PCI address formats
+        self.assertTrue(utils.is_pci_address_format('0000:03:00.0'))
+        self.assertTrue(utils.is_pci_address_format('0000:04:00.1'))
+        self.assertTrue(utils.is_pci_address_format('0001:82:00.2'))
+        self.assertTrue(utils.is_pci_address_format('FFFF:FF:1F.7'))
+        self.assertTrue(utils.is_pci_address_format('abcd:ef:12.3'))
+
+    def test_is_pci_address_format_invalid(self):
+        # Test invalid formats
+        self.assertFalse(utils.is_pci_address_format('eth1'))
+        self.assertFalse(utils.is_pci_address_format('enp3s0f0'))
+        # Wrong domain length
+        self.assertFalse(utils.is_pci_address_format('000:03:00.0'))
+        # Wrong bus length
+        self.assertFalse(utils.is_pci_address_format('0000:3:00.0'))
+        # Wrong device length
+        self.assertFalse(utils.is_pci_address_format('0000:03:0.0'))
+        # Missing function
+        self.assertFalse(utils.is_pci_address_format('0000:03:00.'))
+        # Missing function separator
+        self.assertFalse(utils.is_pci_address_format('0000:03:00'))
+        # Function too long
+        self.assertFalse(utils.is_pci_address_format('0000:03:00.10'))
+        # Empty string
+        self.assertFalse(utils.is_pci_address_format(''))
+        # None
+        self.assertFalse(utils.is_pci_address_format(None))
+        # Non-string
+        self.assertFalse(utils.is_pci_address_format(123))
+        # Device field out of range (max 1F)
+        self.assertFalse(utils.is_pci_address_format('0000:03:20.0'))
+        self.assertFalse(utils.is_pci_address_format('0000:03:FF.0'))
+        # Function field out of range (max 7)
+        self.assertFalse(utils.is_pci_address_format('0000:03:00.8'))
+        self.assertFalse(utils.is_pci_address_format('0000:03:00.F'))
+
+    def test_delete_dpdk_map_entry_removes_file_when_empty(self):
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+        utils.delete_dpdk_map_entry('eth1')
+        self.assertFalse(os.path.exists(common.DPDK_MAPPING_FILE))
+
+    def test_delete_dpdk_map_entry_by_pci(self):
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'},
+            {'name': 'eth2', 'pci_address': '0000:04:00.0',
+             'mac_address': '01:02:03:04:05:07', 'driver': 'igb_uio'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+        utils.delete_dpdk_map_entry('0000:03:00.0')
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+        self.assertEqual(new_map[0]['name'], 'eth2')
+
+    def test_delete_dpdk_map_entry_not_found(self):
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+
+        # Try to delete non-existent entry
+        utils.delete_dpdk_map_entry('eth999')
+
+        # Map should remain unchanged but warning should be logged
+        contents = common.get_file_data(common.DPDK_MAPPING_FILE)
+        new_map = yaml.safe_load(contents) if contents else []
+        self.assertEqual(1, len(new_map))
+
     @mock.patch('os_net_config.utils.processutils.execute',
                 return_value=('', None))
     def test_get_vpp_interface_name_multiple_iterations(self, mock_execute):
@@ -1347,6 +1549,68 @@ dpdk {
         result = utils.get_interface_maxmtu("eth0")
         self.assertEqual(-1, result)
 
+    def test_remove_dpdk_interface_detach_device_not_found(self):
+        def fake_detach(pci):
+            return 0  # Device not found now returns 0 (already detached)
+
+        def fake_unbind(pci):
+            return 0
+
+        def fake_get_dpdk_pci_address(name):
+            if name == 'eth1':
+                return '0000:03:00.0'
+            return None
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+        self.stub_out('os_net_config.common.get_dpdk_pci_address',
+                      fake_get_dpdk_pci_address)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+
+        # Should succeed since device is already detached
+        utils.remove_dpdk_interface('eth1')
+
+        # Entry should be removed from map since unbind succeeded
+        self.assertFalse(os.path.exists(common.DPDK_MAPPING_FILE))
+
+    def test_remove_dpdk_interface_detach_device_in_use_with_retries(self):
+        def fake_detach(pci):
+            return 1  # Device is being used by interfaces (after retries)
+
+        def fake_unbind(pci):
+            return 0
+
+        def fake_get_dpdk_pci_address(name):
+            if name == 'eth1':
+                return '0000:03:00.0'
+            return None
+
+        self.stub_out('os_net_config.utils.detach_dpdk_interfaces',
+                      fake_detach)
+        self.stub_out('os_net_config.utils.unbind_dpdk_interfaces',
+                      fake_unbind)
+        self.stub_out('os_net_config.common.get_dpdk_pci_address',
+                      fake_get_dpdk_pci_address)
+
+        dpdk_map = [
+            {'name': 'eth1', 'pci_address': '0000:03:00.0',
+             'mac_address': '01:02:03:04:05:06', 'driver': 'vfio-pci'}
+        ]
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, dpdk_map)
+
+        # Should abort without proceeding to unbind (after retries failed)
+        utils.remove_dpdk_interface('eth1')
+
+        # Entry should be removed from map since unbind succeeded
+        self.assertFalse(os.path.exists(common.DPDK_MAPPING_FILE))
+
     def test_detach_dpdk_interfaces_retry_mechanism(self):
         """Test that detach retries when device is in use but succeeds"""
         retry_count = 0
@@ -1480,24 +1744,26 @@ dpdk {
     def test_remove_sriov_entries_for_pf_with_entries(self):
         sriov_map = [
             {'device_type': 'pf', 'name': 'eth1', 'numvfs': 5},
-            {'device_type': 'vf', 'device': {'name': 'eth1', 'vfid': 0},
-             'name': 'eth1_0'},
-            {'device_type': 'vf', 'device': {'name': 'eth1', 'vfid': 1},
-             'name': 'eth1_1'},
+            {'device_type': 'vf', 'device': {'name': 'eth1_0', 'vfid': 0},
+             'name': 'eth1'},
+            {'device_type': 'vf', 'device': {'name': 'eth1_1', 'vfid': 1},
+             'name': 'eth1'},
             {'device_type': 'pf', 'name': 'eth2', 'numvfs': 3},
-            {'device_type': 'vf', 'device': {'name': 'eth2', 'vfid': 0},
-             'name': 'eth2_0'}
+            {'device_type': 'vf', 'device': {'name': 'eth2_0', 'vfid': 0},
+             'name': 'eth2'}
         ]
         common.write_yaml_config(common.SRIOV_CONFIG_FILE, sriov_map)
 
-        utils.remove_sriov_entries_for_pf('eth1')
+        utils.remove_entries_for_sriov_dev('eth1')
 
         contents = common.get_file_data(common.SRIOV_CONFIG_FILE)
         remaining_map = yaml.safe_load(contents)
+        # eth1 and it's vf entries removed
         self.assertEqual(2, len(remaining_map))
         # Should only have eth2 entries left
         self.assertEqual('eth2', remaining_map[0]['name'])
-        self.assertEqual('eth2', remaining_map[1]['device']['name'])
+        self.assertEqual('eth2_0', remaining_map[1]['device']['name'])
+        self.assertEqual('eth2', remaining_map[1]['name'])
 
     def test_remove_sriov_entries_for_pf_empty_map(self):
         def fake_disable_service():
@@ -1505,14 +1771,15 @@ dpdk {
         self.stub_out('os_net_config.utils.disable_sriov_config_service',
                       fake_disable_service)
 
-        sriov_map = [
-            {'device_type': 'pf', 'name': 'eth1', 'numvfs': 5},
-            {'device_type': 'vf', 'device': {'name': 'eth1', 'vfid': 0},
-             'name': 'eth1_0'}
-        ]
+        sriov_map = [{
+            'device_type': 'pf', 'link_mode': 'legacy',
+            'name': 'eth1', 'numvfs': 10, 'promisc': 'on',
+            'drivers_autoprobe': True, 'vdpa': False,
+            'pci_address': '0000:8a:07.1',
+            'mac_address': 'aa:bb:cc:dd:ee:ff'}]
         common.write_yaml_config(common.SRIOV_CONFIG_FILE, sriov_map)
 
-        utils.remove_sriov_entries_for_pf('eth1')
+        utils.remove_entries_for_sriov_dev('0000:8a:07.1')
 
         # File should be removed when map becomes empty
         self.assertFalse(os.path.exists(common.SRIOV_CONFIG_FILE))
@@ -1520,17 +1787,39 @@ dpdk {
     def test_remove_sriov_entries_for_pf_nonexistent_pf(self):
         sriov_map = [
             {'device_type': 'pf', 'name': 'eth1', 'numvfs': 5},
-            {'device_type': 'vf', 'device': {'name': 'eth1', 'vfid': 0},
-             'name': 'eth1_0'}
+            {'device_type': 'vf', 'device': {'name': 'eth1_0', 'vfid': 0},
+             'name': 'eth1'}
         ]
         common.write_yaml_config(common.SRIOV_CONFIG_FILE, sriov_map)
 
-        utils.remove_sriov_entries_for_pf('eth999')
+        utils.remove_entries_for_sriov_dev('eth999')
 
         # Original map should remain unchanged
         contents = common.get_file_data(common.SRIOV_CONFIG_FILE)
         remaining_map = yaml.safe_load(contents)
         self.assertEqual(2, len(remaining_map))
+
+    def test_remove_sriov_entries_for_vf_only(self):
+        sriov_map = [
+            {'device_type': 'pf', 'name': 'eth1', 'numvfs': 5},
+            {'device_type': 'vf', 'device': {'name': 'eth1_0', 'vfid': 0},
+             'name': 'eth1'},
+            {'device_type': 'vf', 'device': {'name': 'eth1_1', 'vfid': 1},
+             'name': 'eth1'},
+            {'device_type': 'pf', 'name': 'eth2', 'numvfs': 3},
+            {'device_type': 'vf', 'device': {'name': 'eth2_0', 'vfid': 0},
+             'name': 'eth2'}
+        ]
+        common.write_yaml_config(common.SRIOV_CONFIG_FILE, sriov_map)
+
+        utils.remove_entries_for_sriov_dev('sriov:eth1:0')
+
+        contents = common.get_file_data(common.SRIOV_CONFIG_FILE)
+        remaining_map = yaml.safe_load(contents)
+        self.assertEqual(4, len(remaining_map))
+        # Should only have eth2 and eth1 PF, eth1-vf0 entries left
+        self.assertEqual('eth1', remaining_map[0]['name'])
+        self.assertEqual('eth2', remaining_map[2]['name'])
 
     def test_disable_sriov_config_service_success(self):
         def fake_execute(*args, **kwargs):

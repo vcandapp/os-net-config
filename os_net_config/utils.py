@@ -300,25 +300,108 @@ def bind_dpdk_interfaces(ifname, driver, noop):
         raise common.OvsDpdkBindException(msg)
 
 
-def remove_dpdk_interface(iface):
-    dpdk_map = common.get_dpdk_map()
-    for dpdk_nic in dpdk_map:
-        if dpdk_nic["name"] == iface:
-            err = detach_dpdk_interfaces(dpdk_nic["pci_address"])
-            if err:
-                logger.warning(
-                    "%s: Failed to detach dpdk interface",
-                    dpdk_nic["name"],
-                )
-            err = unbind_dpdk_interfaces(dpdk_nic["pci_address"])
-            if err:
-                logger.error(
-                    "%s: Failed to unbind dpdk interface",
-                    dpdk_nic["name"],
-                )
-            break
+def is_pci_address_format(identifier):
+    """Check if identifier matches PCI address format.
+
+    PCI address format: DDDD:BB:DD.F
+    Where:
+    - DDDD: 4-digit domain (0000-FFFF)
+    - BB: 2-digit bus (00-FF)
+    - DD: 2-digit device (00-1F, max 31)
+    - F: 1-digit function (0-7, max 7)
+
+    Maximum valid entry: FFFF:FF:1F:7
+
+    :param identifier: String to check
+    :returns: True if matches PCI address format, False otherwise
+    """
+    if not isinstance(identifier, str):
+        return False
+
+    # PCI address pattern with proper value constraints
+    # Domain: 0000-FFFF, Bus: 00-FF, Device: 00-1F, Function: 0-7
+    pci_pattern = (r'^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:'
+                   r'(?:[01][0-9a-fA-F])\.[0-7]$')
+    return bool(re.match(pci_pattern, identifier))
+
+
+def remove_dpdk_interface(identifier):
+    """Remove a DPDK interface by name or PCI address.
+
+    Detach and unbind the interface if found.
+
+    :param identifier: Interface name or PCI address
+    """
+    logger.info("%s: Removing DPDK interface", identifier)
+    if is_pci_address_format(identifier):
+        pci_address = identifier
     else:
-        logger.error("%s: could not find in dpdk_mapping.yaml", iface)
+        pci_address = common.get_dpdk_pci_address(identifier)
+
+    if pci_address:
+        # Attempt to detach the interface
+        detach_result = detach_dpdk_interfaces(pci_address)
+        if detach_result == 1:
+            # Other detach error - log warning but continue
+            logger.warning(
+                "%s: Failed to detach dpdk interface, continuing with unbind",
+                identifier,
+            )
+        # detach_result == 0 means success (or device already detached),
+        # continue normally
+        # Attempt to unbind the interface
+        unbind_result = unbind_dpdk_interfaces(pci_address)
+        if unbind_result:
+            logger.error(
+                "%s: Failed to unbind dpdk interface",
+                identifier,
+            )
+            # Don't cleanup map entry if unbind failed
+            return
+
+        # Only cleanup map entry if unbind was successful
+        logger.info("%s: Successfully removed DPDK interface", identifier)
+        delete_dpdk_map_entry(identifier)
+    else:
+        logger.error("%s: could not find PCI address", identifier)
+
+
+def delete_dpdk_map_entry(identifier):
+    """Remove a DPDK mapping entry by interface name or PCI address.
+
+    If the resulting map is empty, remove the DPDK_MAPPING_FILE.
+
+    :param identifier: Interface name or PCI address to remove
+    """
+    dpdk_map = common.get_dpdk_map()
+    new_map = []
+    removed = False
+    for item in dpdk_map:
+        if (item.get("name") == identifier or
+                item.get("pci_address") == identifier):
+            logger.info(
+                "%s: Removing DPDK mapping entry (name: %s, pci: %s)",
+                identifier, item.get("name"), item.get("pci_address")
+            )
+            removed = True
+            continue  # Skip this entry
+        new_map.append(item)
+    if not new_map:
+        if os.path.exists(common.DPDK_MAPPING_FILE):
+            logger.info(
+                "DPDK mapping file %s is empty after removing '%s', "
+                "deleting the file.",
+                common.DPDK_MAPPING_FILE,
+                identifier,
+            )
+            os.remove(common.DPDK_MAPPING_FILE)
+    else:
+        common.write_yaml_config(common.DPDK_MAPPING_FILE, new_map)
+    if not removed:
+        logger.warning(
+            "%s: No DPDK mapping entry found in the mapping file.",
+            identifier
+        )
 
 
 def _handle_dpdk_detach_error(pci_address,
@@ -507,6 +590,88 @@ def remove_sriov_entries_for_pf(pfname):
             logger.debug("%s: Removing PF from sriov_map", pfname)
             continue  # Skip this PF
         new_map.append(item)
+    # Remove the sriov_map file if it is empty
+    if not new_map:
+        logger.debug(
+            "sriov map file is empty and hence removing %s",
+            common.SRIOV_CONFIG_FILE
+        )
+        try:
+            os.remove(common.SRIOV_CONFIG_FILE)
+        except OSError:
+            logger.error("Failed to remove sriov map file")
+            pass
+        disable_sriov_config_service()
+    else:
+        common.write_yaml_config(common.SRIOV_CONFIG_FILE, new_map)
+
+
+def get_sriov_dev_from_pci_address(pci_address):
+    sriov_map = common.get_sriov_map()
+    for item in sriov_map:
+        if item['pci_address'] == pci_address:
+            return item
+    return None
+
+
+def get_sriov_dev_from_name(dev_name):
+    sriov_map = common.get_sriov_map()
+    for item in sriov_map:
+        if item['name'] == dev_name:
+            return item
+    return None
+
+
+def remove_entries_for_sriov_dev(identifier):
+    """Remove SR-IOV mapping entries for a PF and/or VF.
+
+    - If a VF is specified/resolved, remove only that VF mapping entry.
+    - If only a PF is specified/resolved, remove that PF entry and all of its
+      VF entries.
+    - If the resulting SR-IOV map becomes empty, delete
+      `common.SRIOV_CONFIG_FILE` and disable the `sriov_config` systemd
+      service.
+
+    :param identifier: PF/VF selector string in one of the formats
+
+    - "sriov:<pf_name>:<vf_id>" to remove a specific VF entry
+    - PCI address (DDDD:BB:DD.F) to resolve PF/VF from the SR-IOV map
+    - PF or VF device name as stored in the SR-IOV map
+    """
+    vf_id = None
+    dev_item = None
+    pf_name = None
+    if identifier.startswith("sriov:"):
+        pf_name = identifier.split(":")[1]
+        vf_id = int(identifier.split(":")[2])
+    elif is_pci_address_format(identifier):
+        pci_address = identifier
+        dev_item = get_sriov_dev_from_pci_address(pci_address)
+    else:
+        dev_item = get_sriov_dev_from_name(identifier)
+
+    if dev_item:
+        pf_name = dev_item["name"]
+        if dev_item["device_type"] == "vf":
+            vf_id = int(dev_item.get("device", {}).get("vfid"))
+
+    sriov_map = common.get_sriov_map()
+    new_map = []
+    for item in sriov_map:
+        if (item["device_type"] == "vf" and
+                item["name"] == pf_name and
+                (vf_id is None or (
+                int(item.get("device", {}).get("vfid")) == vf_id))):
+            logger.debug(
+                "%s: Removing VF %s from sriov_map", pf_name, item["name"]
+            )
+            continue  # Skip this VF
+        if (item["device_type"] == "pf" and
+                vf_id is None and item["name"] == pf_name):
+            logger.debug("%s: Removing PF from sriov_map", pf_name)
+            continue  # Skip this PF
+        new_map.append(item)
+
     # Remove the sriov_map file if it is empty
     if not new_map:
         logger.debug(
@@ -741,7 +906,7 @@ def get_vf_devname(pf_name, vfid):
     if vf_name is not None:
         return vf_name
     vf_path = common.get_dev_path(pf_name, f"virtfn{vfid}/net")
-    # The path /sys/class/net/{pf_name}/device/virtfn{vfid}/net/{vf_name}
+    # The path /sys/class/net/<pf_name>/device/virtfn<vfid>/net/{vf_name}
     # will be available when the default VF driver is bound with the VF.
     # When sriov_drivers_autoprobe=0, the drivers will not be bound with
     # VF by default and hence the path will not be available. In NIC
