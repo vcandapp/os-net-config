@@ -794,10 +794,12 @@ class IfcfgNetConfig(os_net_config.NetConfig):
                 'net.ipv6.conf.default.disable_ipv6')
             accept_ra_default = utils.get_sysctl_value(
                 'net.ipv6.conf.default.accept_ra')
+            ipv6_forwarding = utils.get_sysctl_value(
+                'net.ipv6.conf.all.forwarding')
 
-            if (ipv6_disabled == '0' and accept_ra_default == '0'):
+            if (ipv6_disabled == '0' and accept_ra_default == '0'
+                and ipv6_forwarding != '1'):
                 data += "IPV6_AUTOCONF=no\n"
-                data += "IPV6_SET_SYSCTLS=yes\n"
                 data += "IPV6_FORCE_ACCEPT_RA=no\n"
 
         if base_opt.hwaddr:
